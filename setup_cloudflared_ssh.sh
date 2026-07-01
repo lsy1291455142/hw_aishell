@@ -73,25 +73,51 @@ step2_configure_sshd() {
     log_info "备份 $sshd_config -> ${sshd_config}.bak"
     sudo cp "$sshd_config" "${sshd_config}.bak"
 
-    # PasswordAuthentication yes
-    if grep -qP '^#?\s*PasswordAuthentication' "$sshd_config"; then
-        log_info "设置 PasswordAuthentication yes"
-        sudo sed -i 's/^#\?\s*PasswordAuthentication.*/PasswordAuthentication yes/' "$sshd_config"
-    else
-        log_info "追加 PasswordAuthentication yes"
-        echo "PasswordAuthentication yes" | sudo tee -a "$sshd_config" > /dev/null
+    # 确保文件末尾有换行符，防止追加时拼接到最后一行尾部
+    if [[ "$(sudo tail -c1 "$sshd_config" | xxd -p 2>/dev/null)" != "0a" ]]; then
+        log_warn "文件末尾缺少换行符，已补上"
+        echo "" | sudo tee -a "$sshd_config" > /dev/null
     fi
 
-    # PermitRootLogin yes
-    if grep -qP '^#?\s*PermitRootLogin' "$sshd_config"; then
-        log_info "设置 PermitRootLogin yes"
-        sudo sed -i 's/^#\?\s*PermitRootLogin.*/PermitRootLogin yes/' "$sshd_config"
-    else
-        log_info "追加 PermitRootLogin yes"
-        echo "PermitRootLogin yes" | sudo tee -a "$sshd_config" > /dev/null
-    fi
+    # --- 辅助函数：安全设置 sshd 配置项 ---
+    # 解决的问题：
+    #   1. 指令可能被拼接到其他行尾部（无换行符导致）
+    #   2. 指令可能以注释形式存在于行首
+    #   3. 指令可能根本不存在
+    set_sshd_option() {
+        local key="$1"    # 配置项名称，如 PermitRootLogin
+        local value="$2"  # 配置项值，如 yes
+        local cfg="$3"    # 配置文件路径
 
-    log_info "sshd 配置已更新"
+        # 1) 清除行内嵌入的指令（如被拼接到 AuthorizedKeysFile 行尾部）
+        #    匹配: PermitRootLogin yes / no / prohibit-password / forced-commands-only
+        sudo sed -i "s/${key}[[:space:]]\+yes//g; s/${key}[[:space:]]\+no//g; s/${key}[[:space:]]\+prohibit-password//g; s/${key}[[:space:]]\+forced-commands-only//g" "$cfg"
+
+        # 2) 删除行首的独立指令行（无论是否注释）
+        sudo sed -i "/^#\{0,1\}[[:space:]]*${key}[[:space:]]/d" "$cfg"
+
+        # 3) 追加正确的独立行
+        echo "${key} ${value}" | sudo tee -a "$cfg" > /dev/null
+    }
+
+    log_info "设置 PasswordAuthentication yes"
+    set_sshd_option "PasswordAuthentication" "yes" "$sshd_config"
+
+    log_info "设置 PermitRootLogin yes"
+    set_sshd_option "PermitRootLogin" "yes" "$sshd_config"
+
+    # 验证配置结果
+    log_info "验证 sshd 配置:"
+    grep -nE "PasswordAuthentication|PermitRootLogin" "$sshd_config" | grep -v "^#"
+
+    # 语法检查
+    if sudo /usr/sbin/sshd -t 2>&1; then
+        log_info "sshd 配置语法检查通过"
+    else
+        log_error "sshd 配置语法检查失败，正在回滚 ..."
+        sudo cp "${sshd_config}.bak" "$sshd_config"
+        return 1
+    fi
 }
 
 # ------------------------------------------------------------
@@ -118,13 +144,13 @@ step3_set_root_password() {
         log_info "使用自定义密码"
     fi
 
-    # 临时禁用 PAM 密码复杂度规则
+    # 永久禁用 PAM 密码复杂度规则
     local pam_files=()
     for f in /etc/pam.d/system-auth /etc/pam.d/password-auth /etc/pam.d/common-password; do
         if [[ -f "$f" ]]; then pam_files+=("$f"); fi
     done
 
-    log_info "临时禁用 PAM 密码复杂度规则 ..."
+    log_info "永久禁用 PAM 密码复杂度规则 ..."
     for f in "${pam_files[@]}"; do
         sudo sed -i 's/^\(password.*pam_pwquality\.so\)/#\1/' "$f"
         sudo sed -i 's/^\(password.*pam_cracklib\.so\)/#\1/' "$f"
@@ -135,15 +161,6 @@ step3_set_root_password() {
     # 设置密码
     log_info "设置 root 密码 ..."
     echo "root:${final_pw}" | sudo chpasswd
-
-    # 恢复 PAM 规则
-    log_info "恢复 PAM 密码复杂度规则 ..."
-    for f in "${pam_files[@]}"; do
-        sudo sed -i 's/^#\(password.*pam_pwquality\.so\)/\1/' "$f"
-        sudo sed -i 's/^#\(password.*pam_cracklib\.so\)/\1/' "$f"
-        sudo sed -i 's/^#\(password.*pam_pwhistory\.so\)/\1/' "$f"
-        sudo sed -i 's/\(pam_unix\.so.*sha512.*shadow.*nullok.*try_first_pass\)/\1 use_authtok/' "$f"
-    done
 
     echo -e "root 密码已设置: ${BOLD}${YELLOW}${final_pw}${RST}"
     ROOT_PW="$final_pw"
@@ -373,12 +390,12 @@ main() {
     step2_configure_sshd
 
     if [[ -n "$root_password" ]]; then
-        # 临时禁用 PAM 密码复杂度规则
+        # 永久禁用 PAM 密码复杂度规则
         local pam_files=()
         for f in /etc/pam.d/system-auth /etc/pam.d/password-auth /etc/pam.d/common-password; do
             if [[ -f "$f" ]]; then pam_files+=("$f"); fi
         done
-        log_info "临时禁用 PAM 密码复杂度规则 ..."
+        log_info "永久禁用 PAM 密码复杂度规则 ..."
         for f in "${pam_files[@]}"; do
             sudo sed -i 's/^\(password.*pam_pwquality\.so\)/#\1/' "$f"
             sudo sed -i 's/^\(password.*pam_cracklib\.so\)/#\1/' "$f"
@@ -386,13 +403,6 @@ main() {
             sudo sed -i 's/use_authtok//' "$f"
         done
         echo "root:${root_password}" | sudo chpasswd
-        log_info "恢复 PAM 密码复杂度规则 ..."
-        for f in "${pam_files[@]}"; do
-            sudo sed -i 's/^#\(password.*pam_pwquality\.so\)/\1/' "$f"
-            sudo sed -i 's/^#\(password.*pam_cracklib\.so\)/\1/' "$f"
-            sudo sed -i 's/^#\(password.*pam_pwhistory\.so\)/\1/' "$f"
-            sudo sed -i 's/\(pam_unix\.so.*sha512.*shadow.*nullok.*try_first_pass\)/\1 use_authtok/' "$f"
-        done
         echo -e "root 密码已设置（通过参数传入）: ${BOLD}${YELLOW}${root_password}${RST}"
         ROOT_PW="$root_password"
     else
