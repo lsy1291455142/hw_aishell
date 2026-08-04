@@ -8,7 +8,7 @@ DISPLAY_NUM=99
 VNC_PORT=5901
 NOVNC_PORT=6080
 SCREEN_SIZE="1280x900x24"
-AISHELL_URL="https://aishell.huaweicloud.com"
+AISHELL_URL="https://developer.huaweicloud.com/aishell.html"
 
 mkdir -p "$PID_DIR" "$LOG_DIR"
 
