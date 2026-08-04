@@ -250,7 +250,7 @@ start_vnc() {
 
     log "启动 x0vncserver (端口 ${VNC_PORT})..."
     setsid x0vncserver -display :${DISPLAY_NUM} -rfbport ${VNC_PORT} \
-        -rfbauth /root/.vnc/passwd -SecurityType VncAuth \
+        -rfbauth /root/.vnc/passwd -SecurityTypes VncAuth \
         > "$LOG_DIR/vnc.log" 2>&1 &
     local pid=$!
     sleep 1
