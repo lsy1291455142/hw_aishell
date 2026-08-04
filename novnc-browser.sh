@@ -51,7 +51,7 @@ clear_pid() {
 
 is_running() {
     local pid
-    pid=$(get_pid "$1" 2>/dev/null || echo 0)
+    pid=$(get_pid "$1" 2>/dev/null)
     [[ "$pid" -gt 0 ]]
 }
 
@@ -421,7 +421,7 @@ do_stop() {
 
     # 按依赖顺序停
     for name in watchdog cloudflared novnc firefox vnc xvfb; do
-        local pid=$(get_pid "$name" 2>/dev/null || echo 0)
+        local pid=$(get_pid "$name" 2>/dev/null)
         if [[ "$pid" -gt 0 ]]; then
             log "停止 $name (PID: $pid)..."
             kill "$pid" 2>/dev/null || true
@@ -447,7 +447,7 @@ do_status() {
     echo "  noVNC Browser 服务状态"
     echo "========================================"
     for name in xvfb vnc firefox novnc cloudflared watchdog; do
-        local pid=$(get_pid "$name" 2>/dev/null || echo 0)
+        local pid=$(get_pid "$name" 2>/dev/null)
         if [[ "$pid" -gt 0 ]] && kill -0 "$pid" 2>/dev/null; then
             printf "  %-12s ✅ 运行中 (PID: %s)\n" "$name" "$pid"
         else
