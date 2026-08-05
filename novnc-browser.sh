@@ -11,6 +11,9 @@
 
 set -euo pipefail
 
+# 在任何 cd 之前保存脚本所在目录（用于定位 watchdog.sh 等同级文件）
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # ==================== 配置 ====================
 DISPLAY_NUM=99
 VNC_PORT=5901
@@ -376,8 +379,8 @@ start_watchdog() {
         return 0
     fi
 
-    # 确保 watchdog.sh 存在
-    local wd_script="$(dirname "$(readlink -f "$0")")/watchdog.sh"
+    # 确保 watchdog.sh 存在（使用脚本开头保存的 SCRIPT_DIR，不受 cd 影响）
+    local wd_script="${SCRIPT_DIR}/watchdog.sh"
     if [[ ! -f "$wd_script" ]]; then
         log "watchdog.sh 不存在，跳过看门狗"
         return 0
