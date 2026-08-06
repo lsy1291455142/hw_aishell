@@ -392,27 +392,35 @@ from Xlib.ext import xtest
 
 d = display.Display(sys.argv[1])
 
+# 递归查找所有 Firefox 窗口，优先返回可见的 (map_state=2)
 def find_win(w):
-    try:
-        c = w.get_wm_class()
-        if c and c[0] and c[1] and 'firefox' in (c[0].lower(), c[1].lower()):
-            return w
-    except Exception:
-        pass
-    try:
-        for ch in w.query_tree().children:
-            r = find_win(ch)
-            if r:
-                return r
-    except Exception:
-        pass
-    return None
+    viewable = None
+    fallback = None
+    def search(win):
+        nonlocal viewable, fallback
+        try:
+            c = win.get_wm_class()
+            if c and c[0] and c[1] and 'firefox' in (c[0].lower(), c[1].lower()):
+                attrs = win.get_attributes()
+                if attrs.map_state == 2 and viewable is None:
+                    viewable = win
+                elif fallback is None:
+                    fallback = win
+        except Exception:
+            pass
+        try:
+            for ch in win.query_tree().children:
+                search(ch)
+        except Exception:
+            pass
+    search(w)
+    return viewable or fallback
 
 win = find_win(d.screen().root)
 if win:
     try:
+        d.set_input_focus(win, X.RevertToParent, X.CurrentTime)
         win.configure(stack_mode=X.AboveStack)
-        win.set_input_focus(X.RevertToParent, X.CurrentTime)
         d.flush()
     except Exception:
         pass
