@@ -23,6 +23,7 @@ VNC_PASSWORD="aishell123"
 SCREEN_SIZE="1280x900x24"
 AISHELL_URL="https://developer.huaweicloud.com/aishell.html"
 FIREFOX_PROFILE="/root/firefox-novnc-profile"
+FIREFOX_MARIONETTE_PORT=2828
 LOG_DIR="/root/novnc-logs"
 PID_DIR="/root/novnc-pids"
 WATCHDOG_INTERVAL=30  # 秒
@@ -300,7 +301,7 @@ start_firefox() {
     fi
 
     setsid firefox --display=:${DISPLAY_NUM} --no-remote \
-        -P novnc --new-instance "${AISHELL_URL}" \
+        -P novnc --new-instance --marionette "${AISHELL_URL}" \
         > "$LOG_DIR/firefox.log" 2>&1 &
     local pid=$!
     sleep 3
@@ -310,7 +311,7 @@ start_firefox() {
     else
         log "Firefox 启动失败，尝试不带 profile..."
         setsid firefox --display=:${DISPLAY_NUM} --no-remote \
-            "${AISHELL_URL}" \
+            --marionette "${AISHELL_URL}" \
             > "$LOG_DIR/firefox.log" 2>&1 &
         pid=$!
         sleep 3
@@ -385,65 +386,47 @@ start_cloudflared() {
 # ==================== 标签页定时刷新 ====================
 # 内联 Python: 通过 python-xlib XTEST 扩展刷新 Firefox 第一个标签页
 _refresh_tab_py() {
-    python3 - "${1:-:99}" << 'PYEOF'
-import sys, time
-from Xlib import X, display, XK
-from Xlib.ext import xtest
+    python3 - "${1:-2828}" << 'PYEOF'
+import sys, socket, json
 
-d = display.Display(sys.argv[1])
+port = int(sys.argv[1])
 
-# 递归查找所有 Firefox 窗口，优先返回可见的 (map_state=2)
-def find_win(w):
-    viewable = None
-    fallback = None
-    def search(win):
-        nonlocal viewable, fallback
-        try:
-            c = win.get_wm_class()
-            if c and c[0] and c[1] and 'firefox' in (c[0].lower(), c[1].lower()):
-                attrs = win.get_attributes()
-                if attrs.map_state == 2 and viewable is None:
-                    viewable = win
-                elif fallback is None:
-                    fallback = win
-        except Exception:
-            pass
-        try:
-            for ch in win.query_tree().children:
-                search(ch)
-        except Exception:
-            pass
-    search(w)
-    return viewable or fallback
+def send_msg(s, msg):
+    data = json.dumps(msg)
+    s.send(f"{len(data)}:{data}".encode())
 
-win = find_win(d.screen().root)
-if win:
-    try:
-        d.set_input_focus(win, X.RevertToParent, X.CurrentTime)
-        win.configure(stack_mode=X.AboveStack)
-        d.flush()
-    except Exception:
-        pass
-    time.sleep(0.5)
+def recv_msg(s):
+    buf = b""
+    while b":" not in buf:
+        buf += s.recv(1)
+    length_str, _, rest = buf.partition(b":")
+    length = int(length_str)
+    while len(rest) < length:
+        rest += s.recv(length - len(rest))
+    return json.loads(rest.decode())
 
-ck = d.keysym_to_keycode(XK.XK_Control_L)
-ok = d.keysym_to_keycode(XK.XK_1)
-if ck and ok:
-    xtest.fake_input(d, X.KeyPress, ck)
-    xtest.fake_input(d, X.KeyPress, ok)
-    xtest.fake_input(d, X.KeyRelease, ok)
-    xtest.fake_input(d, X.KeyRelease, ck)
-    d.flush()
-    time.sleep(1)
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.settimeout(10)
+s.connect(("127.0.0.1", port))
 
-fk = d.keysym_to_keycode(XK.XK_F5)
-if fk:
-    xtest.fake_input(d, X.KeyPress, fk)
-    xtest.fake_input(d, X.KeyRelease, fk)
-    d.flush()
+recv_msg(s)  # handshake
+send_msg(s, [0, 1, "WebDriver:NewSession", {}])
+recv_msg(s)
 
-d.close()
-print('已刷新第一个标签页')
+send_msg(s, [0, 2, "WebDriver:GetWindowHandles", {}])
+resp = recv_msg(s)
+if resp[3]:
+    handles = resp[3]
+else:
+    handles = resp[2]
+if handles:
+    send_msg(s, [0, 3, "WebDriver:SwitchToWindow", {"handle": handles[0]}])
+    recv_msg(s)
+
+send_msg(s, [0, 4, "WebDriver:Refresh", {}])
+recv_msg(s)
+s.close()
+print("已刷新第一个标签页")
 PYEOF
 }
 export -f _refresh_tab_py
@@ -464,10 +447,10 @@ start_tab_refresh() {
     setsid bash -c "
         INTERVAL=${TAB_REFRESH_INTERVAL}
         LOGFILE='${LOG_DIR}/tab-refresh.log'
-        DISPLAY_NUM=${DISPLAY_NUM}
+        MARIONETTE_PORT=${FIREFOX_MARIONETTE_PORT}
         while true; do
             sleep \$INTERVAL
-            _refresh_tab_py :\$DISPLAY_NUM 2>/dev/null && \
+            _refresh_tab_py \$MARIONETTE_PORT 2>/dev/null && \
                 echo \"[\$(date '+%H:%M:%S')] 已刷新第一个标签页\" >> \"\$LOGFILE\"
         done
     " > /dev/null 2>&1 &
@@ -604,12 +587,12 @@ do_refresh() {
         return 1
     fi
 
-    if ! is_running xvfb; then
-        log "Xvfb 未运行，请先运行: $0 start"
+    if ! is_running firefox; then
+        log "Firefox 未运行，请先运行: $0 start"
         return 1
     fi
 
-    _refresh_tab_py ":${DISPLAY_NUM}"
+    _refresh_tab_py "${FIREFOX_MARIONETTE_PORT}"
 }
 
 # ==================== 主入口 ====================
