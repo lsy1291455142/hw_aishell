@@ -25,6 +25,7 @@ FIREFOX_PROFILE="/root/firefox-novnc-profile"
 LOG_DIR="/root/novnc-logs"
 PID_DIR="/root/novnc-pids"
 WATCHDOG_INTERVAL=30  # 秒
+TAB_REFRESH_INTERVAL=1800  # 秒，每半小时刷新一次浏览器第一个标签页
 
 mkdir -p "$LOG_DIR" "$PID_DIR"
 
@@ -80,6 +81,12 @@ do_install() {
         yum install -y tigervnc-server
     fi
 
+    # 检查并安装 xdotool (标签页刷新依赖)
+    if ! command -v xdotool &>/dev/null; then
+        log "安装 xdotool..."
+        yum install -y xdotool
+    fi
+
     # 检查并安装 Firefox
     if ! command -v firefox &>/dev/null; then
         log "安装 Firefox..."
@@ -121,6 +128,7 @@ do_install() {
     log "tmux: $(command -v tmux || echo 'MISSING')"
     log "Xvfb: $(command -v Xvfb || echo 'MISSING')"
     log "x0vncserver: $(command -v x0vncserver || echo 'MISSING')"
+    log "xdotool: $(command -v xdotool || echo 'MISSING')"
     log "firefox: $(command -v firefox || echo 'MISSING')"
     log "websockify: $(command -v websockify || echo 'MISSING')"
     log "cloudflared: $(command -v cloudflared || echo 'MISSING')"
@@ -150,7 +158,7 @@ _novnc_print_info() {
 
     # 检查服务是否在运行
     local running=0
-    for n in xvfb vnc firefox novnc cloudflared; do
+    for n in xvfb vnc firefox novnc cloudflared tab_refresh; do
         local pidfile="$PID_DIR/$n.pid"
         if [[ -f "$pidfile" ]]; then
             local pid=$(cat "$pidfile" 2>/dev/null || echo 0)
@@ -165,10 +173,10 @@ _novnc_print_info() {
     echo "║          noVNC 远程浏览器服务信息                          ║"
     echo "╠══════════════════════════════════════════════════════════╣"
 
-    if [[ "$running" -ge 5 ]]; then
-        echo "║  状态: ✅ 全部运行中 (${running}/5)                         "
+    if [[ "$running" -ge 6 ]]; then
+        echo "║  状态: ✅ 全部运行中 (${running}/6)                         "
     elif [[ "$running" -gt 0 ]]; then
-        echo "║  状态: ⚠️  部分运行 (${running}/5)                          "
+        echo "║  状态: ⚠️  部分运行 (${running}/6)                          "
     else
         echo "║  状态: ❌ 未运行                                            "
     fi
@@ -204,7 +212,7 @@ _novnc_print_info() {
 
     echo "╚══════════════════════════════════════════════════════════╝"
 
-    if [[ "$running" -lt 5 ]]; then
+    if [[ "$running" -lt 6 ]]; then
         echo "  💡 启动服务: /root/novnc-browser.sh start"
     fi
     if [[ -n "$url" ]]; then
@@ -372,6 +380,48 @@ start_cloudflared() {
     fi
 }
 
+# ==================== 标签页定时刷新 ====================
+start_tab_refresh() {
+    if is_running tab_refresh; then
+        log "标签页定时刷新已在运行 (PID: $(get_pid tab_refresh))"
+        return 0
+    fi
+
+    if ! command -v xdotool &>/dev/null; then
+        log "xdotool 未安装，跳过标签页定时刷新"
+        return 0
+    fi
+
+    log "启动标签页定时刷新 (每 ${TAB_REFRESH_INTERVAL}s 刷新第一个标签页)..."
+
+    setsid bash -c "
+        export DISPLAY=:${DISPLAY_NUM}
+        INTERVAL=${TAB_REFRESH_INTERVAL}
+        LOGFILE='${LOG_DIR}/tab-refresh.log'
+        while true; do
+            sleep \$INTERVAL
+            # 激活 Firefox 窗口
+            xdotool search --onlyvisible --class firefox windowactivate 2>/dev/null || true
+            sleep 0.5
+            # 切换到第一个标签页 (Ctrl+1)
+            xdotool key ctrl+1 2>/dev/null || true
+            sleep 1
+            # 刷新页面 (F5)
+            xdotool key F5 2>/dev/null || true
+            echo \"[\$(date '+%H:%M:%S')] 已刷新第一个标签页\" >> \"\$LOGFILE\"
+        done
+    " > /dev/null 2>&1 &
+
+    local pid=$!
+    sleep 1
+    if kill -0 "$pid" 2>/dev/null; then
+        save_pid tab_refresh "$pid"
+        log "标签页定时刷新启动成功 (PID: $pid)"
+    else
+        log "标签页定时刷新启动失败!"
+    fi
+}
+
 # ==================== 看门狗 ====================
 start_watchdog() {
     if is_running watchdog; then
@@ -409,6 +459,7 @@ do_start() {
     start_firefox  || true
     start_novnc    || true
     start_cloudflared || true
+    start_tab_refresh || true
     start_watchdog
 
     log "=== 启动完成 ==="
@@ -423,7 +474,7 @@ do_stop() {
     tmux kill-session -t wd 2>/dev/null || true
 
     # 按依赖顺序停
-    for name in watchdog cloudflared novnc firefox vnc xvfb; do
+    for name in watchdog tab_refresh cloudflared novnc firefox vnc xvfb; do
         local pid=$(get_pid "$name" 2>/dev/null)
         if [[ "$pid" -gt 0 ]]; then
             log "停止 $name (PID: $pid)..."
@@ -440,6 +491,7 @@ do_stop() {
     pkill -f "websockify.*${NOVNC_PORT}" 2>/dev/null || true
     pkill -f "cloudflared tunnel.*${NOVNC_PORT}" 2>/dev/null || true
     pkill -f "firefox.*display=:${DISPLAY_NUM}" 2>/dev/null || true
+    pkill -f "tab.refresh\|tab_refresh" 2>/dev/null || true
 
     log "=== 已停止 ==="
 }
@@ -449,7 +501,7 @@ do_status() {
     echo "========================================"
     echo "  noVNC Browser 服务状态"
     echo "========================================"
-    for name in xvfb vnc firefox novnc cloudflared watchdog; do
+    for name in xvfb vnc firefox novnc cloudflared tab_refresh watchdog; do
         local pid=$(get_pid "$name" 2>/dev/null)
         if [[ "$pid" -gt 0 ]] && kill -0 "$pid" 2>/dev/null; then
             printf "  %-12s ✅ 运行中 (PID: %s)\n" "$name" "$pid"
