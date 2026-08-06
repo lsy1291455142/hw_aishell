@@ -82,10 +82,10 @@ do_install() {
         yum install -y tigervnc-server
     fi
 
-    # 检查并安装 xdotool (标签页刷新依赖)
-    if ! command -v xdotool &>/dev/null; then
-        log "安装 xdotool..."
-        yum install -y xdotool
+    # 检查并安装 python-xlib (标签页刷新依赖，替代 xdotool)
+    if ! python3 -c "import Xlib" 2>/dev/null; then
+        log "安装 python-xlib..."
+        pip3 install python-xlib 2>/dev/null || pip install python-xlib
     fi
 
     # 检查并安装 Firefox
@@ -129,7 +129,8 @@ do_install() {
     log "tmux: $(command -v tmux || echo 'MISSING')"
     log "Xvfb: $(command -v Xvfb || echo 'MISSING')"
     log "x0vncserver: $(command -v x0vncserver || echo 'MISSING')"
-    log "xdotool: $(command -v xdotool || echo 'MISSING')"
+    log "xdotool: N/A (使用 python-xlib 替代)"
+    log "python-xlib: $(python3 -c 'import Xlib; print("OK")' 2>/dev/null || echo 'MISSING')"
     log "firefox: $(command -v firefox || echo 'MISSING')"
     log "websockify: $(command -v websockify || echo 'MISSING')"
     log "cloudflared: $(command -v cloudflared || echo 'MISSING')"
@@ -388,28 +389,28 @@ start_tab_refresh() {
         return 0
     fi
 
-    if ! command -v xdotool &>/dev/null; then
-        log "xdotool 未安装，跳过标签页定时刷新"
+    if ! python3 -c "import Xlib" 2>/dev/null; then
+        log "python-xlib 未安装，跳过标签页定时刷新"
+        return 0
+    fi
+
+    local refresh_script="${SCRIPT_DIR}/refresh_tab.py"
+    if [[ ! -f "$refresh_script" ]]; then
+        log "refresh_tab.py 不存在，跳过标签页定时刷新"
         return 0
     fi
 
     log "启动标签页定时刷新 (每 ${TAB_REFRESH_INTERVAL}s 刷新第一个标签页)..."
 
     setsid bash -c "
-        export DISPLAY=:${DISPLAY_NUM}
         INTERVAL=${TAB_REFRESH_INTERVAL}
         LOGFILE='${LOG_DIR}/tab-refresh.log'
+        REFRESH_SCRIPT='${refresh_script}'
+        DISPLAY_NUM=${DISPLAY_NUM}
         while true; do
             sleep \$INTERVAL
-            # 激活 Firefox 窗口
-            xdotool search --onlyvisible --class firefox windowactivate 2>/dev/null || true
-            sleep 0.5
-            # 切换到第一个标签页 (Ctrl+1)
-            xdotool key ctrl+1 2>/dev/null || true
-            sleep 1
-            # 刷新页面 (F5)
-            xdotool key F5 2>/dev/null || true
-            echo \"[\$(date '+%H:%M:%S')] 已刷新第一个标签页\" >> \"\$LOGFILE\"
+            python3 \"\$REFRESH_SCRIPT\" :\$DISPLAY_NUM 2>/dev/null && \
+                echo \"[\$(date '+%H:%M:%S')] 已刷新第一个标签页\" >> \"\$LOGFILE\"
         done
     " > /dev/null 2>&1 &
 
@@ -492,7 +493,7 @@ do_stop() {
     pkill -f "websockify.*${NOVNC_PORT}" 2>/dev/null || true
     pkill -f "cloudflared tunnel.*${NOVNC_PORT}" 2>/dev/null || true
     pkill -f "firefox.*display=:${DISPLAY_NUM}" 2>/dev/null || true
-    pkill -f "tab.refresh\|tab_refresh" 2>/dev/null || true
+    pkill -f "refresh_tab.py" 2>/dev/null || true
 
     log "=== 已停止 ==="
 }
@@ -540,8 +541,8 @@ do_url() {
 
 # ==================== 立即刷新第一个标签页 ====================
 do_refresh() {
-    if ! command -v xdotool &>/dev/null; then
-        log "xdotool 未安装，请先运行: $0 install"
+    if ! python3 -c "import Xlib" 2>/dev/null; then
+        log "python-xlib 未安装，请先运行: $0 install"
         return 1
     fi
 
@@ -550,18 +551,14 @@ do_refresh() {
         return 1
     fi
 
-    export DISPLAY=:${DISPLAY_NUM}
+    local refresh_script="${SCRIPT_DIR}/refresh_tab.py"
+    if [[ ! -f "$refresh_script" ]]; then
+        log "refresh_tab.py 不存在"
+        return 1
+    fi
 
-    # 激活 Firefox 窗口
-    xdotool search --onlyvisible --class firefox windowactivate 2>/dev/null || true
-    sleep 0.5
-    # 切换到第一个标签页 (Ctrl+1)
-    xdotool key ctrl+1 2>/dev/null || true
-    sleep 1
-    # 刷新页面 (F5)
-    xdotool key F5 2>/dev/null || true
-
-    log "已刷新第一个标签页"
+    python3 "$refresh_script" ":${DISPLAY_NUM}"
+    log "刷新命令已执行"
 }
 
 # ==================== 主入口 ====================
