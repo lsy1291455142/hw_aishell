@@ -7,6 +7,7 @@
 #   ./novnc-browser.sh restart   # 重启
 #   ./novnc-browser.sh status    # 查看状态
 #   ./novnc-browser.sh url       # 获取公网URL
+#   ./novnc-browser.sh refresh   # 立即刷新浏览器第一个标签页
 #   ./novnc-browser.sh           # 默认: install + start
 
 set -euo pipefail
@@ -537,6 +538,32 @@ do_url() {
     fi
 }
 
+# ==================== 立即刷新第一个标签页 ====================
+do_refresh() {
+    if ! command -v xdotool &>/dev/null; then
+        log "xdotool 未安装，请先运行: $0 install"
+        return 1
+    fi
+
+    if ! is_running xvfb; then
+        log "Xvfb 未运行，请先运行: $0 start"
+        return 1
+    fi
+
+    export DISPLAY=:${DISPLAY_NUM}
+
+    # 激活 Firefox 窗口
+    xdotool search --onlyvisible --class firefox windowactivate 2>/dev/null || true
+    sleep 0.5
+    # 切换到第一个标签页 (Ctrl+1)
+    xdotool key ctrl+1 2>/dev/null || true
+    sleep 1
+    # 刷新页面 (F5)
+    xdotool key F5 2>/dev/null || true
+
+    log "已刷新第一个标签页"
+}
+
 # ==================== 主入口 ====================
 case "${1:-default}" in
     install)
@@ -559,13 +586,17 @@ case "${1:-default}" in
     url)
         do_url
         ;;
+    refresh)
+        do_refresh
+        ;;
     default)
         do_install
         do_start
         ;;
     *)
-        echo "用法: $0 {install|start|stop|restart|status|url}"
+        echo "用法: $0 {install|start|stop|restart|status|url|refresh}"
         echo "  无参数 = install + start"
+        echo "  refresh = 立即刷新浏览器第一个标签页"
         exit 1
         ;;
 esac
