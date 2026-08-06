@@ -383,6 +383,63 @@ start_cloudflared() {
 }
 
 # ==================== 标签页定时刷新 ====================
+# 内联 Python: 通过 python-xlib XTEST 扩展刷新 Firefox 第一个标签页
+_refresh_tab_py() {
+    python3 - "${1:-:99}" << 'PYEOF'
+import sys, time
+from Xlib import X, display, XK
+from Xlib.ext import xtest
+
+d = display.Display(sys.argv[1])
+
+def find_win(w):
+    try:
+        c = w.get_wm_class()
+        if c and c[0] and c[1] and 'firefox' in (c[0].lower(), c[1].lower()):
+            return w
+    except Exception:
+        pass
+    try:
+        for ch in w.query_tree().children:
+            r = find_win(ch)
+            if r:
+                return r
+    except Exception:
+        pass
+    return None
+
+win = find_win(d.screen().root)
+if win:
+    try:
+        win.configure(stack_mode=X.AboveStack)
+        win.set_input_focus(X.RevertToParent, X.CurrentTime)
+        d.flush()
+    except Exception:
+        pass
+    time.sleep(0.5)
+
+ck = d.keysym_to_keycode(XK.XK_Control_L)
+ok = d.keysym_to_keycode(XK.XK_1)
+if ck and ok:
+    xtest.fake_input(d, X.KeyPress, ck)
+    xtest.fake_input(d, X.KeyPress, ok)
+    xtest.fake_input(d, X.KeyRelease, ok)
+    xtest.fake_input(d, X.KeyRelease, ck)
+    d.flush()
+    time.sleep(1)
+
+fk = d.keysym_to_keycode(XK.XK_F5)
+if fk:
+    xtest.fake_input(d, X.KeyPress, fk)
+    xtest.fake_input(d, X.KeyRelease, fk)
+    d.flush()
+
+d.close()
+print('已刷新第一个标签页')
+PYEOF
+}
+export -f _refresh_tab_py
+
 start_tab_refresh() {
     if is_running tab_refresh; then
         log "标签页定时刷新已在运行 (PID: $(get_pid tab_refresh))"
@@ -394,22 +451,15 @@ start_tab_refresh() {
         return 0
     fi
 
-    local refresh_script="${SCRIPT_DIR}/refresh_tab.py"
-    if [[ ! -f "$refresh_script" ]]; then
-        log "refresh_tab.py 不存在，跳过标签页定时刷新"
-        return 0
-    fi
-
     log "启动标签页定时刷新 (每 ${TAB_REFRESH_INTERVAL}s 刷新第一个标签页)..."
 
     setsid bash -c "
         INTERVAL=${TAB_REFRESH_INTERVAL}
         LOGFILE='${LOG_DIR}/tab-refresh.log'
-        REFRESH_SCRIPT='${refresh_script}'
         DISPLAY_NUM=${DISPLAY_NUM}
         while true; do
             sleep \$INTERVAL
-            python3 \"\$REFRESH_SCRIPT\" :\$DISPLAY_NUM 2>/dev/null && \
+            _refresh_tab_py :\$DISPLAY_NUM 2>/dev/null && \
                 echo \"[\$(date '+%H:%M:%S')] 已刷新第一个标签页\" >> \"\$LOGFILE\"
         done
     " > /dev/null 2>&1 &
@@ -551,14 +601,7 @@ do_refresh() {
         return 1
     fi
 
-    local refresh_script="${SCRIPT_DIR}/refresh_tab.py"
-    if [[ ! -f "$refresh_script" ]]; then
-        log "refresh_tab.py 不存在"
-        return 1
-    fi
-
-    python3 "$refresh_script" ":${DISPLAY_NUM}"
-    log "刷新命令已执行"
+    _refresh_tab_py ":${DISPLAY_NUM}"
 }
 
 # ==================== 主入口 ====================
