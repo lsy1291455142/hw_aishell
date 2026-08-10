@@ -20,7 +20,7 @@ VNC_PORT=5901
 NOVNC_PORT=6080
 VNC_PASSWORD="aishell123"
 SCREEN_SIZE="1280x900x24"
-AISHELL_URL="https://developer.huaweicloud.com/aishell.html"
+AISHELL_URL="https://devstation.connect.huaweicloud.com/aishell"
 FIREFOX_PROFILE="/root/firefox-novnc-profile"
 LOG_DIR="/root/novnc-logs"
 PID_DIR="/root/novnc-pids"
@@ -34,6 +34,9 @@ ADDON_XPI_FILE="${ADDON_XPI_DIR}/tab_auto_refresh.xpi"
 # 动态获取最新版 URL，失败时回退到此硬编码 URL
 ADDON_FALLBACK_URL="https://addons.mozilla.org/firefox/downloads/file/4784581/tab_auto_refresh-0.2.3.xpi"
 ADDON_AMO_API="https://addons.mozilla.org/api/v5/addons/addon/tab-auto-refresh/"
+# 预配置: 自动刷新的 URL 和间隔(秒)
+ADDON_REFRESH_URL="https://devstation.connect.huaweicloud.com/aishell"
+ADDON_REFRESH_INTERVAL=580
 
 mkdir -p "$LOG_DIR" "$PID_DIR"
 
@@ -100,6 +103,80 @@ download_firefox_addon() {
     fi
 }
 
+patch_firefox_addon() {
+    if [[ ! -f "$ADDON_XPI_FILE" || ! -s "$ADDON_XPI_FILE" ]]; then
+        return 1
+    fi
+
+    log "预配置 ${ADDON_NAME}: 刷新 ${ADDON_REFRESH_URL} 每 ${ADDON_REFRESH_INTERVAL}s..."
+
+    # 用 Python 完成解压 → 修改 → 删签名 → 重新打包
+    ADDON_XPI="$ADDON_XPI_FILE" \
+    ADDON_URL="$ADDON_REFRESH_URL" \
+    ADDON_SEC="$ADDON_REFRESH_INTERVAL" \
+    python3 << 'PYEOF'
+import os, zipfile, shutil, tempfile
+
+xpi_path = os.environ['ADDON_XPI']
+url = os.environ['ADDON_URL']
+sec = os.environ['ADDON_SEC']
+
+# 1. 解压到临时目录
+tmpdir = tempfile.mkdtemp(prefix='xpi-patch-')
+with zipfile.ZipFile(xpi_path, 'r') as z:
+    z.extractall(tmpdir)
+
+# 2. 修改 lib/common.js: 在 core.install 中注入默认刷新配置
+common_js = os.path.join(tmpdir, 'lib', 'common.js')
+with open(common_js, 'r') as f:
+    content = f.read()
+
+old_variants = [
+    '"install": function () {\n    core.load();\n  },',
+    '"install": function () {\r\n    core.load();\r\n  },',
+]
+new = (
+    '"install": function () {\n'
+    '    app.storage.update(function () {\n'
+    '      var _u = "%s";\n'
+    '      var _s = %s;\n'
+    '      var _i = app.storage.read("interval") || {};\n'
+    '      if (!_i[_u]) { _i[_u] = {"interval": _s}; app.storage.write("interval", _i); }\n'
+    '      core.load();\n'
+    '    });\n'
+    '  },'
+) % (url, sec)
+
+patched = False
+for old in old_variants:
+    if old in content:
+        content = content.replace(old, new)
+        patched = True
+        break
+
+if patched:
+    with open(common_js, 'w') as f:
+        f.write(content)
+    print("OK: 预配置已注入")
+else:
+    print("WARNING: 未找到 install 函数，跳过预配置注入")
+
+# 3. 重新打包 (排除 META-INF 签名目录)
+with zipfile.ZipFile(xpi_path, 'w', zipfile.ZIP_DEFLATED) as zout:
+    for root, dirs, files in os.walk(tmpdir):
+        for fname in sorted(files):
+            fpath = os.path.join(root, fname)
+            arcname = os.path.relpath(fpath, tmpdir)
+            if arcname.startswith('META-INF/') or arcname.startswith('META-INF\\'):
+                continue
+            zout.write(fpath, arcname)
+
+shutil.rmtree(tmpdir)
+PYEOF
+
+    log "${ADDON_NAME} 扩展预配置完成"
+}
+
 install_firefox_addon() {
     # 确保扩展文件存在
     if [[ ! -f "$ADDON_XPI_FILE" || ! -s "$ADDON_XPI_FILE" ]]; then
@@ -125,6 +202,7 @@ install_firefox_addon() {
         cat >> "$user_js" << 'PREFOF'
 user_pref("extensions.autoDisableScopes", 0);
 user_pref("extensions.enabledScopes", 15);
+user_pref("xpinstall.signatures.required", false);
 PREFOF
     fi
 
@@ -178,8 +256,9 @@ do_install() {
         yum install -y firefox
     fi
 
-    # 下载 Tab Auto Refresh 扩展
+    # 下载 Tab Auto Refresh 扩展并预配置刷新参数
     download_firefox_addon || true
+    patch_firefox_addon || true
 
     # 检查并安装 websockify + noVNC
     if ! command -v websockify &>/dev/null; then
