@@ -26,6 +26,15 @@ LOG_DIR="/root/novnc-logs"
 PID_DIR="/root/novnc-pids"
 WATCHDOG_INTERVAL=30  # 秒
 
+# Firefox 扩展: Tab Auto Refresh (自动刷新当前标签页)
+ADDON_NAME="Tab Auto Refresh"
+ADDON_GUID="{7fee47a1-8299-4576-90bf-5fd88d756926}"
+ADDON_XPI_DIR="/root/firefox-extensions"
+ADDON_XPI_FILE="${ADDON_XPI_DIR}/tab_auto_refresh.xpi"
+# 动态获取最新版 URL，失败时回退到此硬编码 URL
+ADDON_FALLBACK_URL="https://addons.mozilla.org/firefox/downloads/file/4784581/tab_auto_refresh-0.2.3.xpi"
+ADDON_AMO_API="https://addons.mozilla.org/api/v5/addons/addon/tab-auto-refresh/"
+
 mkdir -p "$LOG_DIR" "$PID_DIR"
 
 # ==================== 工具函数 ====================
@@ -58,6 +67,89 @@ is_running() {
     [[ "$pid" -gt 0 ]]
 }
 
+# ==================== Firefox 扩展 ====================
+download_firefox_addon() {
+    if [[ -f "$ADDON_XPI_FILE" && -s "$ADDON_XPI_FILE" ]]; then
+        log "Firefox 扩展已存在: $ADDON_XPI_FILE"
+        return 0
+    fi
+
+    log "下载 ${ADDON_NAME} 扩展..."
+    mkdir -p "$ADDON_XPI_DIR"
+
+    # 尝试通过 AMO API 获取最新下载链接
+    local url="$ADDON_FALLBACK_URL"
+    local api_url
+    api_url=$(curl -sS --connect-timeout 10 --max-time 20 "$ADDON_AMO_API" 2>/dev/null \
+        | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['current_version']['file']['url'])" 2>/dev/null || true)
+    if [[ -n "$api_url" ]]; then
+        url="$api_url"
+        log "从 AMO API 获取到最新下载链接"
+    else
+        log "AMO API 不可用，使用回退链接"
+    fi
+
+    if curl -sL --connect-timeout 15 --max-time 60 "$url" -o "$ADDON_XPI_FILE" \
+       && [[ -s "$ADDON_XPI_FILE" ]]; then
+        log "${ADDON_NAME} 扩展下载成功 ($(du -h "$ADDON_XPI_FILE" | cut -f1))"
+        return 0
+    else
+        log "警告: ${ADDON_NAME} 扩展下载失败，Firefox 将不带自动刷新扩展启动"
+        rm -f "$ADDON_XPI_FILE"
+        return 1
+    fi
+}
+
+install_firefox_addon() {
+    # 确保扩展文件存在
+    if [[ ! -f "$ADDON_XPI_FILE" || ! -s "$ADDON_XPI_FILE" ]]; then
+        download_firefox_addon || return 1
+    fi
+
+    # 确保 profile 已创建
+    if [[ ! -d "$FIREFOX_PROFILE" ]]; then
+        log "Firefox profile 不存在，跳过扩展安装"
+        return 1
+    fi
+
+    log "安装 ${ADDON_NAME} 扩展到 profile..."
+
+    # 方式1: 将 xpi 放入 profile/extensions/ 目录，以 GUID 命名
+    local ext_dir="${FIREFOX_PROFILE}/extensions"
+    mkdir -p "$ext_dir"
+    cp -f "$ADDON_XPI_FILE" "${ext_dir}/${ADDON_GUID}.xpi"
+
+    # 方式2: 在 profile/user.js 中允许侧载扩展
+    local user_js="${FIREFOX_PROFILE}/user.js"
+    if ! grep -q 'extensions.autoDisableScopes' "$user_js" 2>/dev/null; then
+        cat >> "$user_js" << 'PREFOF'
+user_pref("extensions.autoDisableScopes", 0);
+user_pref("extensions.enabledScopes", 15);
+PREFOF
+    fi
+
+    # 方式3: 通过 policies.json 强制安装（企业部署方式，最可靠）
+    local firefox_bin firefox_realpath dist_dir
+    firefox_bin="$(command -v firefox 2>/dev/null || echo /usr/bin/firefox)"
+    firefox_realpath="$(readlink -f "$firefox_bin")"
+    dist_dir="$(dirname "$firefox_realpath")/distribution"
+    mkdir -p "$dist_dir"
+    cat > "${dist_dir}/policies.json" << POLICYEOF
+{
+  "policies": {
+    "ExtensionSettings": {
+      "${ADDON_GUID}": {
+        "installation_mode": "force_installed",
+        "install_url": "file://${ADDON_XPI_FILE}"
+      }
+    }
+  }
+}
+POLICYEOF
+
+    log "${ADDON_NAME} 扩展安装完成 (profile + policies.json)"
+}
+
 # ==================== 安装 ====================
 do_install() {
     log "=== 安装依赖 ==="
@@ -85,6 +177,9 @@ do_install() {
         log "安装 Firefox..."
         yum install -y firefox
     fi
+
+    # 下载 Tab Auto Refresh 扩展
+    download_firefox_addon || true
 
     # 检查并安装 websockify + noVNC
     if ! command -v websockify &>/dev/null; then
@@ -124,6 +219,11 @@ do_install() {
     log "firefox: $(command -v firefox || echo 'MISSING')"
     log "websockify: $(command -v websockify || echo 'MISSING')"
     log "cloudflared: $(command -v cloudflared || echo 'MISSING')"
+    if [[ -f "$ADDON_XPI_FILE" && -s "$ADDON_XPI_FILE" ]]; then
+        log "${ADDON_NAME}: ✅ $ADDON_XPI_FILE"
+    else
+        log "${ADDON_NAME}: ❌ 未下载"
+    fi
 
     # 安装登录自动打印 hook
     do_install_login_hook
@@ -288,6 +388,9 @@ start_firefox() {
             > "$LOG_DIR/firefox-profile.log" 2>&1 &
         sleep 3
     fi
+
+    # 安装 Tab Auto Refresh 扩展到 profile
+    install_firefox_addon || true
 
     setsid firefox --display=:${DISPLAY_NUM} --no-remote \
         -P novnc --new-instance "${AISHELL_URL}" \
